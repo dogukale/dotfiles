@@ -118,7 +118,7 @@ function Test-ValidateParameter {
 function Test-IsAdministrator {
     return ([Security.Principal.WindowsPrincipal]`
             [Security.Principal.WindowsIdentity]::GetCurrent()`
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -and $env:USERNAME -ne 'WDAGUtilityAccount'
 }
 
 function Test-Prerequisite {
@@ -163,6 +163,7 @@ function Optimize-SecurityProtocol {
         # Set to TLS 1.2 (3072), then TLS 1.1 (768), and TLS 1.0 (192). Ssl3 has been superseded,
         # https://docs.microsoft.com/en-us/dotnet/api/system.net.securityprotocoltype?view=netframework-4.5
         [System.Net.ServicePointManager]::SecurityProtocol = 3072 -bor 768 -bor 192
+        Write-Verbose "SecurityProtocol has been updated to support TLS 1.2"
     }
 }
 
@@ -244,8 +245,19 @@ function Expand-ZipArchive {
         }
     }
 
+    # Workaround to suspend Expand-Archive verbose output,
+    # upstream issue: https://github.com/PowerShell/Microsoft.PowerShell.Archive/issues/98
+    $oldVerbosePreference = $VerbosePreference
+    $global:VerbosePreference = 'SilentlyContinue'
+
+    # Disable progress bar to gain performance
+    $oldProgressPreference = $ProgressPreference
+    $global:ProgressPreference = 'SilentlyContinue'
+
     # PowerShell 5+: use Expand-Archive to extract zip files
     Microsoft.PowerShell.Archive\Expand-Archive -Path $path -DestinationPath $to -Force
+    $global:VerbosePreference = $oldVerbosePreference
+    $global:ProgressPreference = $oldProgressPreference
 }
 
 function Out-UTF8File {
@@ -276,6 +288,7 @@ function Out-UTF8File {
 }
 
 function Import-ScoopShim {
+    Write-InstallInfo "Creating shim..."
     # The scoop executable
     $path = "$SCOOP_APP_DIR\bin\scoop.ps1"
 
@@ -347,8 +360,68 @@ function Get-Env {
         [Switch] $global
     )
 
-    $target = if ($global) { 'Machine' } else { 'User' }
-    return [Environment]::GetEnvironmentVariable($name, $target)
+    $RegisterKey = if ($global) {
+        Get-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    } else {
+        Get-Item -Path 'HKCU:'
+    }
+
+    $EnvRegisterKey = $RegisterKey.OpenSubKey('Environment')
+    $RegistryValueOption = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    $EnvRegisterKey.GetValue($name, $null, $RegistryValueOption)
+}
+
+function Publish-Env {
+    if (-not ("Win32.NativeMethods" -as [Type])) {
+        Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+"@
+    }
+
+    $HWND_BROADCAST = [IntPtr] 0xffff
+    $WM_SETTINGCHANGE = 0x1a
+    $result = [UIntPtr]::Zero
+
+    [Win32.Nativemethods]::SendMessageTimeout($HWND_BROADCAST,
+        $WM_SETTINGCHANGE,
+        [UIntPtr]::Zero,
+        "Environment",
+        2,
+        5000,
+        [ref] $result
+    ) | Out-Null
+}
+
+function Write-Env {
+    param(
+        [String] $name,
+        [String] $val,
+        [Switch] $global
+    )
+
+    $RegisterKey = if ($global) {
+        Get-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    } else {
+        Get-Item -Path 'HKCU:'
+    }
+
+    $EnvRegisterKey = $RegisterKey.OpenSubKey('Environment', $true)
+    if ($val -eq $null) {
+        $EnvRegisterKey.DeleteValue($name)
+    } else {
+        $RegistryValueKind = if ($val.Contains('%')) {
+            [Microsoft.Win32.RegistryValueKind]::ExpandString
+        } elseif ($EnvRegisterKey.GetValue($name)) {
+            $EnvRegisterKey.GetValueKind($name)
+        } else {
+            [Microsoft.Win32.RegistryValueKind]::String
+        }
+        $EnvRegisterKey.SetValue($name, $val, $RegistryValueKind)
+    }
+    Publish-Env
 }
 
 function Add-ShimsDirToPath {
@@ -369,7 +442,7 @@ function Add-ShimsDirToPath {
         }
 
         # For future sessions
-        [System.Environment]::SetEnvironmentVariable('PATH', "$SCOOP_SHIMS_DIR;$userEnvPath", 'User')
+        Write-Env 'PATH' "$SCOOP_SHIMS_DIR;$userEnvPath"
         # For current session
         $env:PATH = "$SCOOP_SHIMS_DIR;$env:PATH"
     }
@@ -425,45 +498,55 @@ function Add-Config {
 }
 
 function Add-DefaultConfig {
-    # If user-level SCOOP env not defined, save to rootPath
+    # If user-level SCOOP env not defined, save to root_path
     if (!(Get-Env 'SCOOP')) {
         if ($SCOOP_DIR -ne "$env:USERPROFILE\scoop") {
-            Add-Config -Name 'rootPath' -Value $SCOOP_DIR | Out-Null
+            Write-Verbose "Adding config root_path: $SCOOP_DIR"
+            Add-Config -Name 'root_path' -Value $SCOOP_DIR | Out-Null
         }
     }
 
     # Use system SCOOP_GLOBAL, or set system SCOOP_GLOBAL
-    # with $env:SCOOP_GLOBAL if RunAsAdmin, otherwise save to globalPath
+    # with $env:SCOOP_GLOBAL if RunAsAdmin, otherwise save to global_path
     if (!(Get-Env 'SCOOP_GLOBAL' -global)) {
         if ((Test-IsAdministrator) -and $env:SCOOP_GLOBAL) {
+            Write-Verbose "Setting System Environment Variable SCOOP_GLOBAL: $env:SCOOP_GLOBAL"
             [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', $env:SCOOP_GLOBAL, 'Machine')
         } else {
             if ($SCOOP_GLOBAL_DIR -ne "$env:ProgramData\scoop") {
-                Add-Config -Name 'globalPath' -Value $SCOOP_GLOBAL_DIR | Out-Null
+                Write-Verbose "Adding config global_path: $SCOOP_GLOBAL_DIR"
+                Add-Config -Name 'global_path' -Value $SCOOP_GLOBAL_DIR | Out-Null
             }
         }
     }
 
     # Use system SCOOP_CACHE, or set system SCOOP_CACHE
-    # with $env:SCOOP_CACHE if RunAsAdmin, otherwise save to cachePath
+    # with $env:SCOOP_CACHE if RunAsAdmin, otherwise save to cache_path
     if (!(Get-Env 'SCOOP_CACHE' -global)) {
         if ((Test-IsAdministrator) -and $env:SCOOP_CACHE) {
+            Write-Verbose "Setting System Environment Variable SCOOP_CACHE: $env:SCOOP_CACHE"
             [Environment]::SetEnvironmentVariable('SCOOP_CACHE', $env:SCOOP_CACHE, 'Machine')
         } else {
             if ($SCOOP_CACHE_DIR -ne "$SCOOP_DIR\cache") {
-                Add-Config -Name 'cachePath' -Value $SCOOP_CACHE_DIR | Out-Null
+                Write-Verbose "Adding config cache_path: $SCOOP_CACHE_DIR"
+                Add-Config -Name 'cache_path' -Value $SCOOP_CACHE_DIR | Out-Null
             }
         }
     }
 
-    # save current datatime to lastUpdate
-    Add-Config -Name 'lastUpdate' -Value ([System.DateTime]::Now.ToString('o')) | Out-Null
+    # save current datatime to last_update
+    Add-Config -Name 'last_update' -Value ([System.DateTime]::Now.ToString('o')) | Out-Null
+}
+
+function Test-CommandAvailable {
+    param (
+        [Parameter(Mandatory = $True, Position = 0)]
+        [String] $Command
+    )
+    return [Boolean](Get-Command $Command -ErrorAction Ignore)
 }
 
 function Install-Scoop {
-    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-    Write-Host "Installing Scoop..." -ForegroundColor Green
-
     Write-InstallInfo "Initializing..."
     # Validate install parameters
     Test-ValidateParameter
@@ -472,43 +555,66 @@ function Install-Scoop {
     # Enable TLS 1.2
     Optimize-SecurityProtocol
 
-    # Download scoop zip from GitHub
-    Write-InstallInfo "Downloading..."
+    # Download scoop from GitHub
+    Write-InstallInfo "Downloading ..."
     $downloader = Get-Downloader
-    # 1. download scoop
-    $scoopZipfile = "$SCOOP_APP_DIR\scoop.zip"
-    if (!(Test-Path $SCOOP_APP_DIR)) {
-        New-Item -Type Directory $SCOOP_APP_DIR | Out-Null
+
+    if (Test-CommandAvailable('git')) {
+        $old_https = $env:HTTPS_PROXY
+        $old_http = $env:HTTP_PROXY
+        try {
+            if ($downloader.Proxy) {
+                #define env vars for git when behind a proxy
+                $Env:HTTP_PROXY = $downloader.Proxy.Address
+                $Env:HTTPS_PROXY = $downloader.Proxy.Address
+            }
+            Write-Verbose "Cloning $SCOOP_PACKAGE_GIT_REPO to $SCOOP_APP_DIR"
+            git clone -q $SCOOP_PACKAGE_GIT_REPO $SCOOP_APP_DIR
+            Write-Verbose "Cloning $SCOOP_MAIN_BUCKET_GIT_REPO to $SCOOP_MAIN_BUCKET_DIR"
+            git clone -q $SCOOP_MAIN_BUCKET_GIT_REPO $SCOOP_MAIN_BUCKET_DIR
+        } catch {
+            Get-Error $_
+        } finally {
+            $env:HTTPS_PROXY = $old_https
+            $env:HTTP_PROXY = $old_http
+        }
+    } else {
+        # 1. download scoop
+        $scoopZipfile = "$SCOOP_APP_DIR\scoop.zip"
+        if (!(Test-Path $SCOOP_APP_DIR)) {
+            New-Item -Type Directory $SCOOP_APP_DIR | Out-Null
+        }
+        Write-Verbose "Downloading $SCOOP_PACKAGE_REPO to $scoopZipfile"
+        $downloader.downloadFile($SCOOP_PACKAGE_REPO, $scoopZipfile)
+        # 2. download scoop main bucket
+        $scoopMainZipfile = "$SCOOP_MAIN_BUCKET_DIR\scoop-main.zip"
+        if (!(Test-Path $SCOOP_MAIN_BUCKET_DIR)) {
+            New-Item -Type Directory $SCOOP_MAIN_BUCKET_DIR | Out-Null
+        }
+        Write-Verbose "Downloading $SCOOP_MAIN_BUCKET_REPO to $scoopMainZipfile"
+        $downloader.downloadFile($SCOOP_MAIN_BUCKET_REPO, $scoopMainZipfile)
+
+        # Extract files from downloaded zip
+        Write-InstallInfo "Extracting..."
+        # 1. extract scoop
+        $scoopUnzipTempDir = "$SCOOP_APP_DIR\_tmp"
+        Write-Verbose "Extracting $scoopZipfile to $scoopUnzipTempDir"
+        Expand-ZipArchive $scoopZipfile $scoopUnzipTempDir
+        Copy-Item "$scoopUnzipTempDir\scoop-*\*" $SCOOP_APP_DIR -Recurse -Force
+        # 2. extract scoop main bucket
+        $scoopMainUnzipTempDir = "$SCOOP_MAIN_BUCKET_DIR\_tmp"
+        Write-Verbose "Extracting $scoopMainZipfile to $scoopMainUnzipTempDir"
+        Expand-ZipArchive $scoopMainZipfile $scoopMainUnzipTempDir
+        Copy-Item "$scoopMainUnzipTempDir\Main-*\*" $SCOOP_MAIN_BUCKET_DIR -Recurse -Force
+
+        # Cleanup
+        Remove-Item $scoopUnzipTempDir -Recurse -Force
+        Remove-Item $scoopZipfile
+        Remove-Item $scoopMainUnzipTempDir -Recurse -Force
+        Remove-Item $scoopMainZipfile
     }
-    $downloader.downloadFile($SCOOP_PACKAGE_REPO, $scoopZipfile)
-    # 2. download scoop main bucket
-    $scoopMainZipfile = "$SCOOP_MAIN_BUCKET_DIR\scoop-main.zip"
-    if (!(Test-Path $SCOOP_MAIN_BUCKET_DIR)) {
-        New-Item -Type Directory $SCOOP_MAIN_BUCKET_DIR | Out-Null
-    }
-    $downloader.downloadFile($SCOOP_MAIN_BUCKET_REPO, $scoopMainZipfile)
-
-    # Extract files from downloaded zip
-    Write-InstallInfo "Extracting..."
-    # 1. extract scoop
-    $scoopUnzipTempDir = "$SCOOP_APP_DIR\_tmp"
-    Expand-ZipArchive $scoopZipfile $scoopUnzipTempDir
-    Copy-Item "$scoopUnzipTempDir\scoop-*\*" $SCOOP_APP_DIR -Recurse -Force
-    # 2. extract scoop main bucket
-    $scoopMainUnzipTempDir = "$SCOOP_MAIN_BUCKET_DIR\_tmp"
-    Expand-ZipArchive $scoopMainZipfile $scoopMainUnzipTempDir
-    Copy-Item "$scoopMainUnzipTempDir\Main-*\*" $SCOOP_MAIN_BUCKET_DIR -Recurse -Force
-
-    # Cleanup
-    Remove-Item $scoopUnzipTempDir -Recurse -Force
-    Remove-Item $scoopZipfile
-    Remove-Item $scoopMainUnzipTempDir -Recurse -Force
-    Remove-Item $scoopMainZipfile
-
     # Create the scoop shim
-    Write-InstallInfo "Creating shim..."
     Import-ScoopShim
-
     # Finially ensure scoop shims is in the PATH
     Add-ShimsDirToPath
     # Setup initial configuration of Scoop
@@ -516,6 +622,24 @@ function Install-Scoop {
 
     Write-InstallInfo "Scoop was installed successfully!" -ForegroundColor DarkGreen
     Write-InstallInfo "Type 'scoop help' for instructions."
+}
+
+function Write-DebugInfo {
+    param($BoundArgs)
+
+    Write-Verbose "-------- PSBoundParameters --------"
+    $BoundArgs.GetEnumerator() | ForEach-Object { Write-Verbose $_ }
+    Write-Verbose "-------- Environment Variables --------"
+    Write-Verbose "`$env:USERPROFILE: $env:USERPROFILE"
+    Write-Verbose "`$env:ProgramData: $env:ProgramData"
+    Write-Verbose "`$env:SCOOP: $env:SCOOP"
+    Write-Verbose "`$env:SCOOP_CACHE: $SCOOP_CACHE"
+    Write-Verbose "`$env:SCOOP_GLOBAL: $env:SCOOP_GLOBAL"
+    Write-Verbose "-------- Selected Variables --------"
+    Write-Verbose "SCOOP_DIR: $SCOOP_DIR"
+    Write-Verbose "SCOOP_CACHE_DIR: $SCOOP_CACHE_DIR"
+    Write-Verbose "SCOOP_GLOBAL_DIR: $SCOOP_GLOBAL_DIR"
+    Write-Verbose "SCOOP_CONFIG_HOME: $SCOOP_CONFIG_HOME"
 }
 
 # Prepare variables
@@ -541,10 +665,15 @@ $SCOOP_CONFIG_FILE = "$SCOOP_CONFIG_HOME\scoop\config.json"
 $SCOOP_PACKAGE_REPO = "https://github.com/ScoopInstaller/Scoop/archive/master.zip"
 $SCOOP_MAIN_BUCKET_REPO = "https://github.com/ScoopInstaller/Main/archive/master.zip"
 
+$SCOOP_PACKAGE_GIT_REPO = "https://github.com/ScoopInstaller/Scoop.git"
+$SCOOP_MAIN_BUCKET_GIT_REPO = "https://github.com/ScoopInstaller/Main.git"
+
 # Quit if anything goes wrong
 $oldErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Stop'
 
+# Logging debug info
+Write-DebugInfo $PSBoundParameters
 # Bootstrap function
 Install-Scoop
 
