@@ -35,7 +35,7 @@ $Packages = 'googlechrome',
 			'notion', 
 			'openoffice', 
 			'vscode', 
-			'postgresql', 
+			'postgresql'
 ForEach ($PackageName in $Packages) {
 	Write-Host "Installing $PackageName..." -ForegroundColor Green
 	scoop install $PackageName
