@@ -9,8 +9,7 @@ ForEach ($BucketName in $Buckets) {
 	scoop bucket add $BucketName
 }
 
-$Packages = 'firefox', 
-			'googlechrome', 
+$Packages = 'googlechrome', 
 			'php', 
 			'nvm', 
 			'composer', 
@@ -22,9 +21,7 @@ $Packages = 'firefox',
 			'starship', 
 			'oraclejre8', 
 			'python', 
-			'phpstorm', 
-			'webstorm', 
-			'pycharm', 
+			'jetbrains-toolbox', 
 			'sublime-text', 
 			'ccleaner', 
 			'discord', 
@@ -32,7 +29,13 @@ $Packages = 'firefox',
 			'teamviewer', 
 			'whatsapp', 
 			'obs-studio', 
-			'zoom'
+			'zoom', 
+			'winrar', 
+			'figma', 
+			'notion', 
+			'openoffice', 
+			'vscode', 
+			'postgresql', 
 ForEach ($PackageName in $Packages) {
 	Write-Host "Installing $PackageName..." -ForegroundColor Green
 	scoop install $PackageName

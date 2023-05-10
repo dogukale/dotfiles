@@ -12,7 +12,7 @@ If(!(Test-Path -Path "$HOME\.config")) {
 	mkdir $HOME\.config
 }
 
-If(!(Test-Path -Path "$HOME\Documents\PowerShell")) {
+If(!(Test-Path -Path "$HOME\Documenten\PowerShell")) {
 	mkdir $HOME\Documents\PowerShell
 }
 
