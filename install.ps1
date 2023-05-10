@@ -18,7 +18,7 @@ Write-Host "This will (re)install all apps. Are you sure you want to run this?" 
 $yesNo = Read-Host "Continue? (Y/n): "
 Write-Host ""
 
-$USER_FULLNAME = "Dogukan Kalemli"
+$USER_USERNAME = "dogukale"
 $USER_EMAIL = "d.kalemli@outlook.com"
 
 If ($yesNo -eq 'y') {
@@ -27,7 +27,6 @@ If ($yesNo -eq 'y') {
 	& $PSScriptRoot\scripts\nvm.ps1
 	& $PSScriptRoot\scripts\git.ps1
 	& $PSScriptRoot\scripts\pwsh.ps1
-	& $PSScriptRoot\scripts\wsl.ps1
 
 	Write-Host "All done!" -ForegroundColor Green
 } Else {

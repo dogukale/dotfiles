@@ -2,7 +2,7 @@
 
 Copy-Item ".\.gitignore" -Destination "$HOME"
 
-git config --global user.name $USER_FULLNAME
+git config --global user.name $USER_USERNAME
 git config --global user.email $USER_EMAIL
 
 git config --global alias.co checkout
