@@ -35,7 +35,9 @@ $Packages = 'googlechrome',
 			'openoffice', 
 			'vscode', 
 			'postgresql', 
-			'firebase'
+			'firebase', 
+			'mysql', 
+			'apache'
 ForEach ($PackageName in $Packages) {
 	Write-Host "Installing $PackageName..." -ForegroundColor Green
 	scoop install $PackageName
