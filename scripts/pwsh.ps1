@@ -5,7 +5,7 @@ $Packages = 'Terminal-Icons',
 			'z'
 ForEach ($PackageName in $Packages) {
 	Write-Host "Installing $PackageName..." -ForegroundColor Green
-	Install-Module -Name $PackageName -Force
+	Install-Module -Name $PackageName -Force -AllowClobber
 }
 
 If(!(Test-Path -Path "$HOME\.config")) {
