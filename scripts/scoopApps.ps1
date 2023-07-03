@@ -34,7 +34,6 @@ $Packages = 'googlechrome',
 			'notion', 
 			'openoffice', 
 			'vscode', 
-			'postgresql', 
 			'firebase', 
 			'mysql', 
 			'apache'
